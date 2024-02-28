@@ -1,1 +1,1 @@
-Lab-6 codes 
+Lab solutions 
