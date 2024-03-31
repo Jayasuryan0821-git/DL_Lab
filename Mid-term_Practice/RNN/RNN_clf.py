@@ -2,72 +2,97 @@ import os
 import torch
 from torch import nn
 from pathlib import Path
-import glob
 from torch.utils.data import DataLoader, Dataset
 
-# Assuming num_classes is the total number of nationalities in your dataset
-num_classes = 0  # Replace 0 with the actual number of nationalities
-
-labels = []
-all_names = []  # Use a different variable to store the lists of names
+# Define dataset directory
 base_dir = Path('data/dataset/names')
-files = list(base_dir.glob('*'))
+file_paths = list(base_dir.glob('*'))
 
-# Iterate over each nationality file
-for file_path in files:
+# Initialize variables
+all_names = []
+labels = []
+categories = [file_path.stem for file_path in file_paths]
+num_classes = len(categories)
+max_len_name = 0
+
+# Determine the maximum name length
+for file_path in file_paths:
     with open(file_path, 'r', encoding='utf-8') as f:
-        names = f.read()
-    names_list = names.split('\n')
+        names = f.read().split("\n")
+        for name in names:
+            if len(name) > max_len_name:
+                max_len_name = len(name)
 
-    # Process each name in the file
-    for name in names_list:
-        num_list = [ord(k) for k in name] + [0] * (20 - len(name))  # Pad to ensure length is 20
+# Prepare the data
+for i, file_path in enumerate(file_paths):
+    nationality_index = categories.index(file_path.stem)
+    with open(file_path, 'r', encoding='utf-8') as f:
+        names = [name for name in f.read().split('\n') if name]  # Exclude empty names
+    for name in names:
+        num_list = [ord(k) for k in name] + [0] * (max_len_name - len(name))
         all_names.append(num_list)
+        labels.append(nationality_index)
 
-    labels.extend([num_classes] * len(names_list))
-    num_classes += 1
+# Define dataset
+class MyDataset(Dataset):
+    def __init__(self, X, y):
+        self.X = torch.tensor(X, dtype=torch.float32)
+        self.y = torch.tensor(y, dtype=torch.long)
 
-class RNN(nn.Module):
-    def __init__(self, num_classes):
-        super(RNN, self).__init__()
-        self.rnn = nn.RNN(input_size=1, hidden_size=12, num_layers=1, batch_first=True)
-        self.fc1 = nn.Linear(12, num_classes)  # Adjusted to have a neuron for each class
+    def __getitem__(self, index):
+        return self.X[index], self.y[index]
+    
+    def __len__(self):
+        return len(self.X)
 
-    def forward(self, x):
-        output, _ = self.rnn(x)
-        output = output[:, -1, :]  # Get the last time step output
+# Define RNN model
+class RNN_Model(nn.Module):
+    def __init__(self, input_size, hidden_size, num_classes):
+        super().__init__()
+        self.rnn = nn.RNN(input_size=input_size, hidden_size=hidden_size, num_layers=1, batch_first=True)
+        self.fc1 = nn.Linear(in_features=hidden_size, out_features=num_classes)
+
+    def forward(self, X):
+        output, _ = self.rnn(X)
+        output = output[:, -1, :]
         output = self.fc1(output)
         return output
 
-class MyDataset(Dataset):
-    def __init__(self, x, y):
-        self.x = torch.tensor(x, dtype=torch.float32)
-        self.y = torch.tensor(y, dtype=torch.float32)
-
-    def __getitem__(self, idx):
-        return self.x[idx], self.y[idx]
-
-    def __len__(self):
-        return len(self.x)
-
+# Create dataset and data loader
 data = MyDataset(all_names, labels)
-train_loader = DataLoader(dataset=data, batch_size=32, shuffle=True)
+data_loader = DataLoader(data, batch_size=32, shuffle=True)
 
+# Initialize model, loss criterion, and optimizer
 device = "cuda" if torch.cuda.is_available() else "cpu"
-model = RNN(num_classes).to(device)
-epochs = 500
+model = RNN_Model(input_size=1, hidden_size=12, num_classes=num_classes).to(device)
 criterion = nn.CrossEntropyLoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=0.005)
 
+# Training loop
+epochs = 5
 for epoch in range(epochs):
-    running_loss = 0
-    for batch, (X, y) in enumerate(train_loader):
+    train_loss = 0 
+    for batch, (X, y) in enumerate(data_loader):
         X, y = X.to(device), y.to(device)
+        X = X.view(-1, max_len_name, 1)
         optimizer.zero_grad()
-        y_pred = model(X.view(-1, 20, 1))  # Ensure input is correctly shaped
-        loss = criterion(y_pred, y.long())  # Ensure target is a long tensor
+        y_pred = model(X)
+        loss = criterion(y_pred, y)
         loss.backward()
         optimizer.step()
-        running_loss += loss.item()
-    if epoch % 100 == 0:
-        print(f"Epoch {epoch} Loss: {running_loss}")
+        train_loss += loss.item()
+    train_loss /= len(data_loader)
+    print(f"Epoch {epoch+1} | Loss: {train_loss}")
+
+def predict(model,name,max_len_name,categories,device):
+    name_ascii = [ord(char) for char in name] + [0] * (max_len_name - len(name))
+    name_tensor = torch.tensor([name_ascii],dtype=torch.float32).view(-1,max_len_name,1).to(device)
+    model.eval()
+    with torch.inference_mode():
+        output = model(name_tensor)
+    _,predicted_index = torch.max(output,1)
+    return categories[predicted_index.item()]
+
+sample_input = 'Alexander'
+sample_out =  predict(model,sample_input,max_len_name,categories,device)
+print(f"The predicted nationality for {sample_input} is {sample_out}.")
